@@ -23,7 +23,9 @@ From the repository root, dependencies are already installed. Open two PowerShel
 
 Open [Intent](http://127.0.0.1:5173/). The API is at [API docs](http://127.0.0.1:8000/api/docs). Stop each server with Ctrl+C. Use `-Reload` on Start-Api during backend development.
 
-Start-Api without `-DemoOnly` uses your private .env and configured providers. A failed configured live provider is shown as an error; it does not masquerade as a fixture result.
+Start-Api without `-DemoOnly` uses your private .env and live providers. An essential Senso claim with missing credentials, missing approved sources, or a failed check blocks the proposal; it never masquerades as a fixture result. Use the explicit demo mode above for an offline run.
+
+The live Senso path distinguishes retrieval from an actual `kb_accuracy` fact-check. Arc's replaceable bulb and Halo's serviceable components have approved-source support; Fold's replaceable-module claim conflicts with its spec, and Halo's bulb claim remains unsupported. These are separate capabilities. Product/source versions bind proposal approval and execution while money and merchant validation remain deterministic. [Initialize the corpus](SETUP.md#3-senso-evidence) and review [live check IDs and scope](docs/SENSO_LIVE_ACCESS.md).
 
 For a clean checkout:
 

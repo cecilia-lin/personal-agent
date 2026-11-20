@@ -13,8 +13,18 @@ def product_fingerprint(product):
 
 
 def evidence_fingerprint(passages):
-    records = [{k: p.get(k) for k in ("content_id", "source_id", "version_id", "source_version",
-                                    "content_chunk_id", "excerpt", "chunk_text")} for p in passages]
+    records = []
+    for passage in passages:
+        if passage.get("source_body_hash") and passage.get("source_version_num") is not None:
+            # A fresh evaluation may quote another passage from the identical
+            # approved document. Bind approvals to the body/version, not wording
+            # selected by the evaluator or its new run identifier.
+            record = {k: passage.get(k) for k in ("content_id", "version_id", "source_body_hash", "source_version_num")}
+        else:
+            record = {k: passage.get(k) for k in ("content_id", "source_id", "version_id", "source_version",
+                                                  "content_chunk_id", "excerpt", "chunk_text")}
+        if record not in records:
+            records.append(record)
     return fingerprint(sorted(records, key=lambda p: json.dumps(p, sort_keys=True)))
 
 

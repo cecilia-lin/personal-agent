@@ -291,10 +291,10 @@ def test_watch_rechecks_error_even_when_local_quote_versions_are_unchanged(live_
     assert arc(watched)["proposal_allowed"] is False
 
 
-def test_actual_senso_adapter_service_error_is_explicit_to_shopper(live_claim_client):
+def test_actual_senso_adapter_service_error_is_explicit_to_shopper(live_claim_client, senso_runtime_ledger):
     client, _ = live_claim_client
     provider = SensoEvidenceProvider("unit-test-key", transport=httpx.MockTransport(
-        lambda request: httpx.Response(503, json={"detail": "unavailable"})))
+        lambda request: httpx.Response(503, json={"detail": "unavailable"})), ledger=senso_runtime_ledger)
     client.app.state.service.evidence = provider
     task = run(client)
     candidate = arc(task)

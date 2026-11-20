@@ -62,6 +62,7 @@ class Product(Contract):
     observed_at: str
 
 class CreateTask(Contract):
+    requirement: Literal["repairability", "replaceable_bulb", "replaceable_light_module", "serviceable_components"] | None = None
     urgency: Literal["now", "soon", "flexible"] = "soon"
     target_price_minor: Money | None = None
     goal: NonBlank = Field(min_length=3, max_length=500)

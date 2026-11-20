@@ -11,6 +11,7 @@ from app.integrations.claim_verification import allowed, evidence_fingerprint, p
 from app.integrations.senso import evidence_provider, repairability_claim
 from app.integrations.sie import SIERanker
 from app.services.skills import FinanceSkill, ShoppingSkill, UtilitiesSkill, PortfolioSkill
+from app.services.requirements import supported_requirement, claim_required
 
 def uid(prefix):
     return f"{prefix}_{uuid4().hex}"
@@ -35,9 +36,10 @@ class AgentService:
         if self.settings.mode != "demo":
             raise Problem("Live identity, model, and merchant adapters are not configured. Set APP_MODE=demo for the local fixture journey.", 503)
 
-    def product_evidence(self, product, required):
+    def product_evidence(self, product, required, requirement="repairability"):
         """Network boundary: callers must finish their read transaction first."""
         live = bool(getattr(self.evidence, "requires_context", False))
+        product = {**product, "_required_feature": requirement}
         passages = []
         try:
             passages = self.evidence.for_product(product)
@@ -46,6 +48,8 @@ class AgentService:
             elif not live:
                 result = {"state": "demo", **repairability_claim(product),
                           "reason": "Fixture catalog only; no Senso claim verification.", "sources": passages}
+                if requirement != "repairability" and repairability_claim({k: v for k, v in product.items() if k != "_required_feature"})["feature"] != requirement:
+                    result.update(state="unsupported", reason="The offline fixture does not assert this exact required feature.")
             elif hasattr(self.evidence, "verify_product"):
                 result = self.evidence.verify_product(product, passages)
             else:
@@ -54,13 +58,20 @@ class AgentService:
             result = {"state": "error", "reason": f"Required claim unresolved: evidence service error ({type(exc).__name__})."}
         result = {"feature": None, "claim": None, "check_id": None, "checked_at": None, "sources": [],
                   "provider": "senso" if live else "fixture", "provenance": "live" if live else "fixture",
-                  **result, "requirement": "repairability", "required": required,
+                  **result, "requirement": requirement, "required": required,
                   "product_id": product["id"], "product_version": product["version"],
                   "product_fingerprint": product_fingerprint(product),
                   "evidence_fingerprint": evidence_fingerprint(passages), "evaluated_at": now()}
         # A provider cannot waive an essential shopper requirement.
         if required and result["state"] == "not_required":
             result.update(state="not_verifiable", reason="Required repairability claim was not checked.")
+        if live and required and result["state"] == "supported":
+            expected = repairability_claim(product)
+            normalize_claim = lambda value: " ".join(str(value or "").casefold().strip().rstrip(".").split())
+            if (not expected["claim"] or result.get("feature") != expected["feature"]
+                    or normalize_claim(result.get("claim")) != normalize_claim(expected["claim"])
+                    or requirement != "repairability" and expected["feature"] != requirement):
+                result.update(state="not_verifiable", reason="The evidence service did not verify this product's exact requested feature and claim.")
         if live and required and result["state"] == "supported" and not allowed(result, True):
             result.update(state="not_verifiable", reason="Fact-check response lacks a check ID or versioned supporting passage.")
         result["support_fingerprint"] = evidence_fingerprint(result["sources"])
@@ -91,7 +102,7 @@ class AgentService:
             preferences = unit.get("preferences", "shopping")
             if product["category"] != task["category"]:
                 raise Problem("This product is outside the task's selected category.")
-        evidence = self.product_evidence(product, preferences["repairable"])
+        evidence = self.product_evidence(product, claim_required(task, preferences), task.get("requirement", "repairability"))
         with self.store.transaction(user_id, write=True) as unit:
             current = unit.get("products", product_id)
             ctx = self.context(unit)
@@ -110,13 +121,13 @@ class AgentService:
             self.event(unit, task, "required_claim_checked", {"product_id": product_id, **evidence})
         return evidence["verification"]
 
-    def claim_reason(self, product, verification, required, original=None):
-        if not verification or verification.get("required") != required or verification.get("product_fingerprint") != product_fingerprint(product):
+    def claim_reason(self, product, verification, required, original=None, requirement="repairability"):
+        if not verification or verification.get("required") != required or verification.get("requirement") != requirement or verification.get("product_fingerprint") != product_fingerprint(product):
             return "Required claim is stale or missing for this product version. Run verification again."
         if not allowed(verification, bool(getattr(self.evidence, "requires_context", False))):
             return f"Required claim {verification.get('state', 'pending')}: {verification.get('reason', 'unresolved')}"
         if original is not None and any(original.get(k) != verification.get(k) for k in (
-                "product_fingerprint", "evidence_fingerprint", "support_fingerprint", "claim", "feature", "required", "provider")):
+                "product_fingerprint", "evidence_fingerprint", "support_fingerprint", "claim", "feature", "requirement", "required", "provider")):
             return "Required claim or evidence version changed since this proposal. Review a new proposal."
         return None
 
@@ -202,10 +213,15 @@ class AgentService:
 
     def create_task(self, user_id, request):
         self.require_demo()
+        if request.category != "desk-light":
+            raise Problem("The shopping demo supports the desk-light category. Use the Utilities view for bills.", 422)
+        requirement = supported_requirement(request.goal, request.requirement)
+        essential = bool(request.requirement or "repairable" in request.goal.casefold() or requirement != "repairability")
         with self.store.transaction(user_id, write=True) as unit:
             self.context(unit)
             task = self._new_task(unit, request.goal, request.category, request.max_price_minor)
-            return unit.save("tasks", task["id"], {**task, "urgency": request.urgency, "target_price_minor": request.target_price_minor}, task["version"])
+            return unit.save("tasks", task["id"], {**task, "requirement": requirement, "essential_requirement": essential,
+                                                "urgency": request.urgency, "target_price_minor": request.target_price_minor}, task["version"])
 
     def run_task(self, user_id, task_id):
         self.require_demo()
@@ -222,7 +238,7 @@ class AgentService:
                 checks = ShoppingSkill.evaluate(product, snapshot_context, snapshot["max_price_minor"], quote=quote)
                 candidates.append({**product, **checks, "quote": quote, "price_history": self.intent.history(unit, product["id"])})
         for candidate in candidates:
-            self.apply_evidence(candidate, self.product_evidence(candidate, snapshot_context["preferences"]["repairable"]))
+            self.apply_evidence(candidate, self.product_evidence(candidate, claim_required(snapshot, snapshot_context["preferences"]), snapshot.get("requirement", "repairability")))
         ranking = (self.ranker.score(candidates, snapshot["category"], snapshot_context["preferences"]["repairable"])
                    if snapshot["routing"].get("enabled") and candidates else
                    {"provider": "deterministic-demo", "provenance": "simulated", "reason": "enable_reranker is false"})
@@ -285,7 +301,7 @@ class AgentService:
             task = unit.get("tasks", task_id)
             product = unit.get("products", request.product_id)
             ctx = self.context(unit)
-            claim_error = self.claim_reason(product, verification, ctx["preferences"]["repairable"])
+            claim_error = self.claim_reason(product, verification, claim_required(task, ctx["preferences"]), requirement=task.get("requirement", "repairability"))
             if claim_error:
                 raise Problem(claim_error)
             if task["status"] not in {"awaiting_selection", "awaiting_approval", "approved"}:
@@ -338,7 +354,8 @@ class AgentService:
             return "Proposal expired. Prepare a new proposal."
         product = unit.get("products", terms["product_id"])
         ctx = self.context(unit)
-        claim_error = self.claim_reason(product, verification, ctx["preferences"]["repairable"], terms.get("verification") or {})
+        task = unit.get("tasks", proposal["task_id"])
+        claim_error = self.claim_reason(product, verification, claim_required(task, ctx["preferences"]), terms.get("verification") or {}, task.get("requirement", "repairability"))
         if claim_error:
             return claim_error
         if product["version"] != terms["quote_version"] or product["source_version"] != terms["source_version"]:
@@ -494,9 +511,10 @@ class AgentService:
             if existing:
                 return {**existing.get("result", {}), "run_id": run_id, "duplicate": True, "status": existing["status"]}
             watched = [w for w in unit.all("watch_items") if w["status"] == "active"][:limit]
-            products = {w["product_id"]: unit.get("products", w["product_id"]) for w in watched}
-            required = unit.get("preferences", "shopping")["repairable"]
-        watch_evidence = {key: self.product_evidence(product, required) for key, product in products.items()}
+            products = {w["id"]: (unit.get("products", w["product_id"]), unit.get("tasks", w["task_id"])) for w in watched}
+            preferences = unit.get("preferences", "shopping")
+        watch_evidence = {key: self.product_evidence(product, claim_required(task, preferences), task.get("requirement", "repairability"))
+                          for key, (product, task) in products.items()}
         with self.store.transaction(user_id, write=True) as unit:
             existing = unit.get("runs", run_id, False)
             if existing:

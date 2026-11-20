@@ -38,13 +38,21 @@ Do not put keys in VITE_* variables or Git. Never share the local database or ra
 
 ## 3. Senso evidence
 
-Set SENSO_API_KEY. The adapter checks GET /org/me and uses POST /org/search/context. Queries contain catalog names/IDs, not household balances or documents. The knowledge base must contain relevant product or merchant-policy passages. The current configured account returned a versioned Arc passage.
+Set `SENSO_API_KEY` in the server's ignored `.env`. The adapter uses scoped `POST /org/search/context`, documented `POST /org/evals/text` with `kb_accuracy`, and `GET /org/evals/runs/{id}`. Only fictional catalog identities/claims leave the app, not household balances or imported personal documents.
 
-Passages are evidence, not authority for money, stock, or checkout. A configured failed/empty live retrieval leaves the product unsupported; it does not silently switch to fixture passages. Use -DemoOnly to explicitly run the fixture demo.
+Initialize the approved fictional corpus on a new environment, then retain its ignored `.local/senso-corpus-ledger.json`:
 
-Required repairability claims now have a separate verification record and server-owned proposal gate. Arc's replaceable bulb, Fold's replaceable module, and Halo's serviceable components are distinct claims. The timeboxed live fact-check experiment did not obtain a check response; this build therefore retains retrieval but marks essential live claims not_verifiable and blocks proposals. It does not invent a verdict or check ID. The offline cart path is explicitly labeled as a fixture. See [live access findings](docs/SENSO_LIVE_ACCESS.md) and [automated acceptance](docs/SENSO_VERIFICATION.md).
+```powershell
+.\.venv\Scripts\python.exe scripts/senso_corpus_check.py --upload --runs 1
+# Later: reuse existing sources and evaluation idempotency keys.
+.\.venv\Scripts\python.exe scripts/senso_corpus_check.py --runs 3
+```
 
-Reference: [Senso quickstart](https://docs.senso.ai/docs/quickstart).
+Passages and verdicts do not determine money, stock, or merchant terms. Missing credentials, failed/empty retrieval, source mismatch, and unresolved checks block essential live claims; none silently selects fixtures. Use `-DemoOnly` (`INTEGRATIONS_ENABLED=false`) or explicit `EVIDENCE_PROVIDER=fixture`/`offline` for the labeled offline path.
+
+Required capabilities have a separate verification record and server-owned proposal, approval, and execution gate. Replaceable bulbs, replaceable light modules, and serviceable components are distinct requirements. Live checks establish Arc's bulb and Halo's serviceable components, contradict Fold's module and Mini's bulb claims, and leave Halo's bulb unsupported. The first real check completed within the new ten-minute experiment. Approvals retain native check/claim IDs and approved evidence versions; the current source body is checked before and after evaluation. See [live access and version binding](docs/SENSO_LIVE_ACCESS.md) and [controlled acceptance tests](docs/SENSO_VERIFICATION.md).
+
+References: [Senso quickstart](https://docs.senso.ai/docs/quickstart) and [official evaluation API schema](https://docs.senso.ai/specs/sdk-api.yaml).
 
 ## 4. SIE and Statsig
 
@@ -105,7 +113,7 @@ The official CLI launcher is ready: `.\scripts\Guild.ps1 auth login`. Browser si
 
 Set COGNEE_API_KEY, then run `.\.venv\Scripts\python.exe scripts/check_cognee.py`. The read-only check verifies the key at Cognee's platform API, discovers the current workspace URL when COGNEE_BASE_URL is blank, and checks its authenticated datasets endpoint. A successful URL is saved in the ignored .env. The configured key and workspace returned HTTP 200.
 
-This does not ingest documents, create memories, or test recall. The app still has only a PreferenceMemory interface; no Cognee memory adapter is connected to task decisions. Reference: [Cognee API keys and connection details](https://docs.cognee.ai/cognee-cloud/ui/api-keys).
+That connection-check command does not ingest documents or test recall. A separate bounded preparation job now supports sample catalog ingestion, isolated synthetic persona/session memory, actual graph retrieval, and a read-only prepared-memory adapter. It does not alter household data or turn sample prices into executable quotes. See [the data job and actual verification results](docs/COGNEE_DATA_JOB.md). Reference: [Cognee API keys and connection details](https://docs.cognee.ai/cognee-cloud/ui/api-keys).
 
 ## 9. Re-run verification
 

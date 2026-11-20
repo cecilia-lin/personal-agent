@@ -73,17 +73,23 @@ def test_analytics_failure_does_not_fail_a_committed_task(client, monkeypatch):
     assert client.post(f"/api/tasks/{task['id']}/run").status_code == 200
 
 
-def test_senso_retains_citations_and_uses_runtime_api():
+def test_senso_retains_citations_and_uses_runtime_api(senso_runtime_ledger):
     def respond(request):
-        assert request.url.path == "/api/v1/org/search/context"
         assert request.headers["X-API-Key"] == "unit-test-key"
+        if request.url.path == "/api/v1/org/kb/nodes/node-1/content":
+            return httpx.Response(200, json={"id": "content-1", "text": "Arc Light is repairable.",
+                                            "version_num": 3, "processing_status": "complete"})
+        assert request.url.path == "/api/v1/org/search/context"
+        import json
+        payload = json.loads(request.content)
+        assert payload["content_ids"] == ["content-1"] and payload["require_scoped_ids"] is True
         return httpx.Response(200, json={"search_type": "hybrid", "results": [{
             "content_id": "content-1", "kb_node_id": "node-1", "version_id": "version-3",
             "chunk_text": "Arc Light is repairable.", "score": 0.9, "rank": 1,
             "retrieval": {"lexical": {"rank": 1}},
         }]})
 
-    provider = SensoEvidenceProvider("unit-test-key", transport=httpx.MockTransport(respond))
+    provider = SensoEvidenceProvider("unit-test-key", transport=httpx.MockTransport(respond), ledger=senso_runtime_ledger)
     try:
         evidence = provider.for_product({"id": "arc-light", "name": "Arc Light"})
         assert evidence[0]["kb_node_id"] == "node-1"
@@ -128,10 +134,13 @@ def test_invalid_sie_scores_are_an_explicit_local_fallback():
     (200, {"results": []}),
     (200, {"results": [{"content_id": "unrelated", "chunk_text": "Unrelated product"}]}),
 ])
-def test_missing_senso_context_blocks_recommendations(client, status, payload):
-    provider = SensoEvidenceProvider("unit-test-key", transport=httpx.MockTransport(
-        lambda request: httpx.Response(status, json=payload),
-    ))
+def test_missing_senso_context_blocks_recommendations(client, status, payload, senso_runtime_ledger):
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": "content-1", "text": "Arc Light is repairable.",
+                                            "version_num": 3, "processing_status": "complete"})
+        return httpx.Response(status, json=payload)
+    provider = SensoEvidenceProvider("unit-test-key", transport=httpx.MockTransport(respond), ledger=senso_runtime_ledger)
     client.app.state.service.evidence = provider
     task = client.post("/api/tasks", json={"goal": "Find a repairable desk light"}).json()
     result = client.post(f"/api/tasks/{task['id']}/run").json()
