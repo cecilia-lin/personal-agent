@@ -4,9 +4,9 @@ The React client reads persisted backend data over /api through Vite's local pro
 
 ## State and invariants
 
-Each SQL table has (user_id, id) as its primary key, a monotonically increasing version, and a JSON payload. Tables are whitelisted in the repository. Values use parameterized queries and every read/write includes the owner. SQLite uses BEGIN IMMEDIATE for mutations. SingleStore uses a rowstore schema with SHARD KEY(user_id), an owned account-row lock, and conditional version updates. The SingleStore dialect is prepared but requires a live database check.
+Each SQL table has (user_id, id) as its primary key, a monotonically increasing version, and a JSON payload. Tables are whitelisted in the repository. Values use parameterized queries and every read/write includes the owner. SQLite uses BEGIN IMMEDIATE for mutations. SingleStore uses a rowstore schema with SHARD KEY(user_id), an owned account-row lock, and conditional version updates. Its payloads use LONGTEXT, with a widening migration for the initial TEXT schema. TLS SQL access and bounded live ownership, rollback, concurrency, deduplication and persistence checks passed; the existing local app records still use SQLite.
 
-Current tables: accounts, bills, preferences, sessions, tasks, products, proposals, actions, audit_events, analytics_events, holdings (legacy read-only fixture), sources, source_versions, offers, merchant_offers, bill_imports, bill_history, reservations, next_actions, runs, adjustments.
+Current tables: accounts, bills, preferences, sessions, tasks, products, proposals, actions, audit_events, analytics_events, holdings (legacy read-only fixture), sources, source_versions, offers, merchant_offers, bill_imports, bill_history, reservations, next_actions, runs, adjustments, watch_items, price_history.
 
 Money is integer USD cents. Cash snapshot, subsequent adjustments, unpaid commitments, safety buffer, active reservations, and the shopping cap remain distinct. The allowance is max(0, min(uncommitted cash, remaining cap)). Reservations reduce each limiting constraint once; those constraints are compared with min rather than subtracted from each other. No payment or settlement endpoint exists. Cap usage is an explicit stored input; this demo period has no automatic calendar rollover.
 

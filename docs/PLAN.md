@@ -54,7 +54,7 @@ Owners are deliberately unassigned until teammates claim them.
 
 | Track | Files to own | Next concrete deliverable |
 |---|---|---|
-| Models and canonical state | integrations/sie.py, repositories/, extraction adapter work | Confirm hosted extraction/generation capabilities; implement model-assisted extraction with typed validation; validate SingleStore transactions |
+| Models and canonical state | integrations/sie.py, repositories/, extraction adapter work | Confirm hosted extraction/generation capabilities; implement model-assisted extraction with typed validation; plan deployment and migration using the verified SingleStore path |
 | Purchasing experience | apps/web/, services/intent.py, services/merchant.py | Refine explanation of targets and evidence; validate additional sample categories without changing shared money rules |
 | Utilities and background | services/documents.py, scan handler, docs/guild/ | Install the Guild integration and verify one UI-closed watch/reminder run; verify analytics sessions in dashboard |
 
