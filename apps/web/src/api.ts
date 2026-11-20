@@ -1,4 +1,11 @@
 export interface RecordBase { id: string; version: number; user_id: string }
+export type ShoppingRequirement = 'repairability' | 'replaceable_bulb' | 'replaceable_light_module' | 'serviceable_components';
+export const shoppingRequirements: Record<ShoppingRequirement, { label: string; goal: string }> = {
+  repairability: { label: 'Repairability · verify the stated repair feature', goal: 'Find a repairable desk light.' },
+  replaceable_bulb: { label: 'Replaceable bulb', goal: 'Find a desk light with a replaceable bulb.' },
+  replaceable_light_module: { label: 'Replaceable light module', goal: 'Find a desk light with a replaceable light module.' },
+  serviceable_components: { label: 'Serviceable components', goal: 'Find a desk light with serviceable components.' },
+};
 export interface Budget { spendable_minor: number; protected_minor: number; bills_minor: number; reservations_minor: number; available_minor: number; currency: string; formula: string }
 export interface Bill extends RecordBase { name: string; amount_minor: number; previous_minor: number; due_at: string; source_id: string; provenance: string }
 export interface Product extends RecordBase { name: string; category: string; description: string; price_minor: number; tax_minor: number | null; shipping_minor: number | null; stock: number; repairable: boolean; source_id: string; source_version: number; observed_at: string; provenance: string }

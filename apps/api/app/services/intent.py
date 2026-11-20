@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta
 from app.domain.models import Problem, now
 from app.services.skills import ShoppingSkill
+from app.services.requirements import claim_required
 
 class Intent:
     def __init__(self, agent):
@@ -65,7 +66,7 @@ class Intent:
             watch = unit.save("watch_items", record_id, {
                 "task_id": task_id, "product_id": chosen, "product_name": product["name"],
                 "target_price_minor": task.get("target_price_minor"), "urgency": task.get("urgency", "soon"),
-                "max_price_minor": task["max_price_minor"], "status": "active", "created_at": now(),
+                "max_price_minor": task["max_price_minor"], "requirement": task.get("requirement", "repairability"), "status": "active", "created_at": now(),
                 "last_checked_at": None, "next_check": now(), "recommendation": decision,
                 "last_versions": None, "provenance": "simulated",
             }, old["version"] if old else None)
@@ -80,24 +81,29 @@ class Intent:
             if watch["status"] != "active":
                 continue
             product = unit.get("products", watch["product_id"])
-            evidence = prepared_evidence.get(product["id"])
+            evidence = prepared_evidence.get(watch["id"])
             if evidence is None:
                 continue  # A watch added during retrieval is checked on the next bounded scan.
             ctx = self.agent.context(unit)
+            task = unit.get("tasks", watch["task_id"])
             quote = self.agent.merchant.quote(unit, product)
             versions = {"product": product["version"], "budget": ctx["context_versions"],
+                        "task_requirement": task.get("requirement", "repairability"),
+                        "essential_requirement": task.get("essential_requirement", False),
                         "quote": quote.get("quote_digest"),
                         "evidence": evidence["verification"].get("evidence_fingerprint"),
                         "support": evidence["verification"].get("support_fingerprint"),
+                        "requirement": evidence["verification"].get("requirement"),
+                        "feature": evidence["verification"].get("feature"),
+                        "claim": evidence["verification"].get("claim"),
                         "verification_state": evidence["verification"]["state"]}
             if watch["last_versions"] == versions and watch["next_check"] > now():
                 continue
-            task = unit.get("tasks", watch["task_id"])
             checks = ShoppingSkill.evaluate(product, ctx, watch["max_price_minor"], quote=quote)
             candidate = {**product, **checks, "quote": quote, "price_history": self.history(unit, product["id"]),
                          **evidence}
             self.agent.apply_evidence(candidate, evidence)
-            stale = self.agent.claim_reason(product, evidence["verification"], ctx["preferences"]["repairable"])
+            stale = self.agent.claim_reason(product, evidence["verification"], claim_required(task, ctx["preferences"]), requirement=task.get("requirement", "repairability"))
             if stale:
                 candidate["eligible"] = candidate["proposal_allowed"] = False
                 candidate["reasons"].append(stale)

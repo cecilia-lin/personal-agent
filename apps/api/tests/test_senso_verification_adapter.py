@@ -29,9 +29,9 @@ def test_catalog_features_are_distinct_precise_claims(products):
 
 def test_retrieved_passage_never_becomes_fact_check_support(products):
     def forbidden_request(request):
-        raise AssertionError("No fact-check endpoint has been confirmed.")
+        raise AssertionError("No approved source ledger was supplied; remote checks must not run.")
 
-    provider = SensoEvidenceProvider("test-key", transport=httpx.MockTransport(forbidden_request))
+    provider = SensoEvidenceProvider("test-key", transport=httpx.MockTransport(forbidden_request), ledger={})
     passages = [{"content_id": "doc-1", "version_id": "v1", "excerpt": "Arc desk light has a replaceable bulb."}]
     try:
         result = provider.verify_product(products["arc-light"], passages)
@@ -47,7 +47,7 @@ def test_retrieved_passage_never_becomes_fact_check_support(products):
 
 
 def test_unknown_catalog_claim_is_not_verifiable(products):
-    provider = SensoEvidenceProvider("test-key")
+    provider = SensoEvidenceProvider("test-key", ledger={})
     try:
         result = provider.verify_product({**products["arc-light"], "id": "new-light"}, [])
         assert result["state"] == "not_verifiable"
@@ -57,9 +57,9 @@ def test_unknown_catalog_claim_is_not_verifiable(products):
         provider.close()
 
 
-def test_retrieval_service_error_is_explicit_and_blocks(products):
+def test_retrieval_service_error_is_explicit_and_blocks(products, senso_runtime_ledger):
     provider = SensoEvidenceProvider("test-key", transport=httpx.MockTransport(
-        lambda request: httpx.Response(503, json={"message": "unavailable"})))
+        lambda request: httpx.Response(503, json={"message": "unavailable"})), ledger=senso_runtime_ledger)
     try:
         passages = provider.for_product(products["arc-light"])
         result = provider.verify_product(products["arc-light"], passages)

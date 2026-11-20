@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 import os
+from pathlib import Path
 from fastapi import FastAPI, Depends, Header, Query
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -77,6 +78,13 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/integrations")
     def integrations():
         return {"integrations": integration_status(settings, app.state.database_ready, service.evidence, service.ranker)}
+
+    @app.post("/api/research-memory/recall")
+    def research_memory(user=Depends(actor)):
+        from app.services.research_memory import get_research_memory
+        root = Path(__file__).resolve().parents[3]
+        output = Path(os.getenv("COGNEE_PREPARATION_OUTPUT", str(root / ".local/cognee-job-smoke")))
+        return get_research_memory(output)
 
     @app.post("/api/demo/seed")
     def seed(user=Depends(actor)):

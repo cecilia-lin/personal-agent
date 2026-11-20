@@ -1,170 +1,230 @@
-"""Upload the fictional desk-light spec sheets to Senso and fact-check the answer key live.
+"""Publish only four fictional specs, then check the shared live runtime contract.
 
-Usage (from the repo root, SENSO_API_KEY in the root .env or the environment):
-    python scripts/senso_corpus_check.py --upload   # first time: upload docs, then check
-    python scripts/senso_corpus_check.py            # re-run checks only (no duplicate uploads)
-    python scripts/senso_corpus_check.py --runs 1   # quicker single pass
-
-Uses the documented endpoints from https://docs.senso.ai/specs/sdk-api.yaml:
-    POST /org/kb/raw          create a raw-text document (202, async ingestion)
-    GET  /org/content/{id}    poll processing_status until complete
-    POST /org/evals/text      kb_accuracy fact-check (wait=true, falls back to polling)
-    GET  /org/evals/runs/{id} poll a queued run
-
-Only fictional product text leaves the machine. Results go to .local/senso-corpus-check.json.
+--upload-only publishes or reuses identical documents and confirms readiness.
+Without upload flags this reconciles existing sources and repeats checks only.
+The local answer key is never read or uploaded by this program.
 """
 import argparse
+from contextlib import contextmanager
+import hashlib
 import json
 import os
-import sys
-import time
 from pathlib import Path
+import sys
 
-import httpx
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "fixtures" / "senso"
-BASE_URL = "https://apiv2.senso.ai/api/v1"
-DOCS = ["arc-light", "fold-light", "halo-light", "mini-light"]
+sys.path.insert(0, str(ROOT / "apps/api"))
+from app.preparation.senso_publish import SensoPublisher, SensoJobError, timestamp
 
-# Mirrors fixtures/senso/senso_answer_key.md
-CASES = [
-    ("arc-light", "Arc desk light has a replaceable bulb.", "verified"),
-    ("fold-light", "Fold task light has a replaceable light module.", "conflict"),
-    ("halo-light", "Halo studio light has serviceable components.", "verified"),
-    ("halo-light", "Halo studio light has a replaceable bulb.", "not_verifiable"),
-    ("mini-light", "Mini LED light has a replaceable bulb.", "conflict"),
-]
-FINISHED = {"completed", "gated", "failed"}
-
-
-def api_key():
-    key = os.getenv("SENSO_API_KEY", "").strip()
-    env = ROOT / ".env"
-    if not key and env.exists():
-        for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("SENSO_API_KEY="):
-                key = line.split("=", 1)[1].strip().strip('"').strip("'")
-    if not key:
-        sys.exit("Set SENSO_API_KEY in the root .env (or the environment) first.")
-    return key
+CORPUS = ROOT / "fixtures/senso"
+SCHEMA = "intent-senso-corpus-v1"
+NAMESPACE = "intent-desk-light-spec-v1"
+DOCS = ("arc-light", "fold-light", "halo-light", "mini-light")
+LEDGER = ROOT / ".local/senso-corpus-ledger.json"
+RESULTS = ROOT / ".local/senso-corpus-check.json"
+CASES = (
+    ("arc-light", "Arc desk light", "replaceable_bulb", "has a replaceable bulb", "supported"),
+    ("fold-light", "Fold task light", "replaceable_light_module", "has a replaceable light module", "conflict"),
+    ("halo-light", "Halo studio light", "serviceable_components", "has serviceable components", "supported"),
+    ("halo-light", "Halo studio light", "replaceable_bulb", "has a replaceable bulb", "unsupported"),
+    ("mini-light", "Mini LED light", "replaceable_bulb", "has a replaceable bulb", "conflict"),
+)
 
 
-def upload(client):
-    uploaded = {}
-    for product in DOCS:
-        path = CORPUS / f"{product}_spec_v1.md"
-        text = path.read_text(encoding="utf-8")
-        title = text.splitlines()[0].lstrip("# ").strip()
-        r = client.post("/org/kb/raw", json={"title": title, "text": text})
-        r.raise_for_status()
-        body = r.json()
-        uploaded[product] = {"content_id": body["id"], "version_id": body.get("latest_content_version_id"),
-                             "kb_node_id": body.get("kb_node_id"), "title": title}
-        print(f"  uploaded {path.name} -> content {body['id']}")
-    print("  waiting for ingestion...")
-    deadline = time.time() + 300
-    pending = set(uploaded)
-    while pending and time.time() < deadline:
-        for product in list(pending):
-            r = client.get(f"/org/content/{uploaded[product]['content_id']}")
-            r.raise_for_status()
-            status = r.json().get("processing_status")
-            if status == "complete":
-                uploaded[product]["version_id"] = r.json().get("latest_content_version_id")
-                pending.discard(product)
-                print(f"  ingested {product}")
-            elif status == "failed":
-                sys.exit(f"Ingestion failed for {product}: {r.json().get('error_code')}")
-        if pending:
-            time.sleep(5)
-    if pending:
-        sys.exit(f"Ingestion still pending after 5 minutes: {sorted(pending)}")
-    return uploaded
+def digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def fact_check(client, claim, label):
-    r = client.post("/org/evals/text", json={
-        "text": claim, "evaluator": "kb_accuracy", "wait": True, "label": label,
-    }, timeout=httpx.Timeout(90, connect=10))
-    r.raise_for_status()
-    run = r.json()
-    deadline = time.time() + 180
-    while run.get("status") not in FINISHED and time.time() < deadline:
-        time.sleep(4)
-        r = client.get(f"/org/evals/runs/{run['eval_run_id']}")
-        r.raise_for_status()
-        run = r.json()
-    return run
+def save(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
-def summarize(run):
-    claims = run.get("claims") or []
-    first = claims[0] if claims else {}
-    evidence = first.get("evidence") or []
-    return {
-        "eval_run_id": run.get("eval_run_id"), "status": run.get("status"),
-        "verdict": first.get("verdict") or ("(no claim)" if run.get("status") == "completed" else run.get("status")),
-        "quote": first.get("quote"), "reasoning": first.get("reasoning"),
-        "confidence": first.get("confidence"), "grounding_failed": first.get("grounding_failed"),
-        "evidence": [{k: e.get(k) for k in ("content_id", "content_version_id", "relation")} for e in evidence],
-        "claims_found": len(claims), "error": run.get("error_message"),
-    }
+@contextmanager
+def exclusive_run(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".lock")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise ValueError("Corpus job lock exists; reconcile the prior process before another run") from None
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def documents():
+    output = {}
+    for product_id in DOCS:
+        text = (CORPUS / f"{product_id}_spec_v1.md").read_text(encoding="utf-8")
+        if f"Product ID: {product_id}" not in text or "Fictional demo data" not in text:
+            raise ValueError("Corpus spec lacks its fictional label or product identity")
+        output[product_id] = {"source_id": product_id, "title": text.splitlines()[0].lstrip("# "),
+                              "text": text, "content_hash": digest(text), "source_version": digest(text),
+                              "schema_version": SCHEMA}
+    return output
+
+
+def load_ledger(path):
+    if not path.exists():
+        return {"schema_version": SCHEMA, "namespace": NAMESPACE, "products": {}, "created_at": timestamp()}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if value.get("schema_version") != SCHEMA or value.get("namespace") != NAMESPACE:
+        raise ValueError("Unexpected corpus ledger schema or namespace")
+    return value
+
+
+def find_exact_source(publisher, document):
+    """Bounded read-only reconciliation; never change text to evade duplicates."""
+    status, found = publisher._request("GET", "/org/kb/find", params={"q": document["title"], "limit": 20})
+    if status != 200 or not isinstance(found, dict) or not isinstance(found.get("nodes"), list):
+        raise SensoJobError("Could not reconcile existing sources before upload")
+    matches = []
+    for node in found["nodes"][:5]:
+        if not node.get("content_id") or not node.get("kb_node_id"):
+            continue
+        code, body = publisher._request("GET", f"/org/kb/nodes/{node['kb_node_id']}/content")
+        if code == 200 and isinstance(body, dict) and isinstance(body.get("text"), str) and digest(body["text"]) == document["content_hash"]:
+            matches.append({"content_id": node["content_id"], "kb_node_id": node["kb_node_id"],
+                            "version_id": body.get("latest_content_version_id"), "version_num": body.get("version_num")})
+    if len(matches) > 1:
+        raise SensoJobError("Multiple exact corpus documents exist; explicit reconciliation is required")
+    return matches[0] if matches else None
+
+
+def bind_current_version(publisher, entry, document):
+    """Confirm body and readiness, then bind a UUID from scoped retrieval."""
+    code, body = publisher._request("GET", f"/org/kb/nodes/{entry['kb_node_id']}/content")
+    if (code != 200 or not isinstance(body, dict) or body.get("id") != entry["content_id"]
+            or not isinstance(body.get("text"), str) or digest(body["text"]) != document["content_hash"]):
+        return {**entry, "status": "blocked", "error": "Remote corpus body or identity differs from approved local spec"}
+    if body.get("processing_status") != "complete":
+        return {**entry, "status": "pending", "error": "Corpus content is not fully processed"}
+    code, response = publisher._request("POST", "/org/search/context", json={
+        "query": f"Product {document['source_id']}: {document['title']}. Repair and parts.",
+        "content_ids": [entry["content_id"]], "require_scoped_ids": True, "max_results": 3})
+    passages = response.get("results", []) if code == 200 and isinstance(response, dict) else []
+    matching = [p for p in passages if isinstance(p, dict) and p.get("content_id") == entry["content_id"]
+                and p.get("version_id") and p.get("content_chunk_id") and isinstance(p.get("chunk_text"), str)]
+    versions = {p["version_id"] for p in matching}
+    if len(versions) != 1 or (entry.get("version_id") and entry["version_id"] not in versions):
+        return {**entry, "status": "pending", "error": "Scoped retrieval has no single matching approved version"}
+    return {**entry, "version_id": versions.pop(), "version_num": body.get("version_num"),
+            "status": "ready", "body_verified_at": timestamp(), "retrieval_checked_at": timestamp()}
+
+
+def prepare(publisher, ledger, path, *, allow_upload, max_wait_seconds=60):
+    for product_id, document in documents().items():
+        def checkpoint(entry):
+            ledger["products"][product_id] = {**entry, "source_path": f"fixtures/senso/{product_id}_spec_v1.md"}
+            ledger["updated_at"] = timestamp()
+            save(path, ledger)
+
+        existing = ledger["products"].get(product_id)
+        if existing and existing.get("content_hash") != document["content_hash"]:
+            raise ValueError("Local spec changed after publication; reconcile its version explicitly")
+        if existing and existing.get("status") == "not_uploaded":
+            existing = None
+        if not existing or not existing.get("content_id"):
+            duplicate = find_exact_source(publisher, document)
+            if duplicate:
+                existing = {**{k: v for k, v in document.items() if k != "text"}, **duplicate,
+                            "namespace": NAMESPACE, "status": "processing", "reused_exact_source": True,
+                            "created_at": timestamp()}
+                checkpoint(existing)
+            elif existing:
+                checkpoint({**existing, "status": "ambiguous", "error": "No exact source found yet; upload was not repeated"})
+                continue
+            elif not allow_upload:
+                checkpoint({**{k: v for k, v in document.items() if k != "text"}, "namespace": NAMESPACE,
+                            "status": "not_uploaded", "error": "Run --upload-only to publish this fictional spec"})
+                continue
+        entry = publisher.publish(document, existing, checkpoint=checkpoint)
+        if entry.get("content_id") and entry.get("kb_node_id"):
+            entry = publisher.wait_ready(entry, max_wait_seconds=max_wait_seconds,
+                                         checkpoint=lambda value: checkpoint({**value, "status": "processing"}
+                                                                             if value.get("status") == "ready" else value))
+            if entry.get("status") == "ready":
+                try:
+                    entry = bind_current_version(publisher, entry, document)
+                except SensoJobError as exc:
+                    entry = {**entry, "status": "pending", "error": str(exc)}
+                if entry["status"] == "ready":
+                    entry.pop("error", None)
+            checkpoint(entry)
+        print(json.dumps({"product_id": product_id, "status": ledger["products"][product_id]["status"]}), flush=True)
+    return all(ledger["products"].get(p, {}).get("status") == "ready" for p in DOCS)
+
+
+def check(api_key, ledger_path, runs, output):
+    from app.integrations.senso import SensoEvidenceProvider
+    provider = SensoEvidenceProvider(api_key, ledger_path=ledger_path)
+    results = {"schema_version": SCHEMA, "checked_at": timestamp(), "results": []}
+    try:
+        for product_id, name, feature, suffix, expected in CASES:
+            case = {"product": product_id, "claim": f"{name} {suffix}.", "expected_state": expected, "runs": []}
+            for _ in range(runs):
+                result = provider.verify_claim({"id": product_id, "name": name}, case["claim"], feature)
+                case["runs"].append(result)
+                save(output, results | {"in_progress": case})
+            states = [result.get("state") for result in case["runs"]]
+            evidence = [json.dumps([{key: source.get(key) for key in
+                         ("content_id", "content_chunk_id", "version_id", "source_version", "excerpt", "chunk_text")}
+                         for source in result.get("sources", [])], sort_keys=True) for result in case["runs"]]
+            stable = len(set(states)) == 1 and len(set(evidence)) == 1
+            case.update(stable=stable, passed=stable and all(state == expected for state in states),
+                        distinct_check_count=len({result.get("check_id") for result in case["runs"] if result.get("check_id")}),
+                        repeat_mode="Idempotent input replay; repeated calls may reuse a completed evaluator run")
+            results["results"].append(case)
+            save(output, results)
+            print(json.dumps({"product": product_id, "feature": feature, "expected": expected,
+                              "states": states, "passed": case["passed"]}), flush=True)
+    finally:
+        provider.close()
+    return all(case["passed"] for case in results["results"])
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--upload", action="store_true", help="upload the 4 spec sheets first")
-    parser.add_argument("--runs", type=int, default=3, help="repetitions per claim (default 3)")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--upload", action="store_true", help="publish/reuse specs before checking")
+    parser.add_argument("--upload-only", action="store_true", help="publish/reuse specs and verify readiness")
+    parser.add_argument("--dry-run", action="store_true", help="validate local specs without network")
+    parser.add_argument("--runs", type=int, choices=range(1, 4), default=3)
+    parser.add_argument("--max-wait-seconds", type=int, choices=range(0, 91), default=60)
+    parser.add_argument("--ledger", type=Path, default=LEDGER)
+    parser.add_argument("--output", type=Path, default=RESULTS)
     args = parser.parse_args()
-
-    out_path = ROOT / ".local" / "senso-corpus-check.json"
-    out_path.parent.mkdir(exist_ok=True)
-    previous = json.loads(out_path.read_text()) if out_path.exists() else {}
-
-    with httpx.Client(base_url=BASE_URL, headers={"X-API-Key": api_key()},
-                      timeout=httpx.Timeout(30, connect=5)) as client:
-        r = client.get("/org/me")
-        r.raise_for_status()
-        print("Senso organization reachable.")
-        docs = upload(client) if args.upload else previous.get("documents", {})
-        if not docs:
-            print("No upload record found; run with --upload if the docs aren't in Senso yet.")
-
-        id_to_product = {d["content_id"]: p for p, d in docs.items()}
-        results, all_pass = [], True
-        for product, claim, expected in CASES:
-            runs = []
-            for i in range(args.runs):
-                try:
-                    runs.append(summarize(fact_check(client, claim, f"desk-light-{product}-{i + 1}")))
-                except httpx.HTTPError as exc:
-                    runs.append({"verdict": "service_error", "error": type(exc).__name__})
-            verdicts = [r["verdict"] for r in runs]
-            stable = len(set(verdicts)) == 1
-            ok = stable and verdicts[0] == expected
-            all_pass &= ok
-            sources = {id_to_product.get(e["content_id"], e["content_id"] or "?")
-                       for r in runs for e in r.get("evidence", [])}
-            results.append({"product": product, "claim": claim, "expected": expected,
-                            "verdicts": verdicts, "stable": stable, "pass": ok,
-                            "evidence_from": sorted(sources), "runs": runs})
-            print(f"\n{'PASS' if ok else 'FAIL'}  {claim}\n  expected {expected}, got {verdicts}"
-                  f"\n  evidence from: {sorted(sources) or 'none'}"
-                  f"\n  quote: {runs[0].get('quote') or '-'}")
-
-    out_path.write_text(json.dumps({"documents": docs, "results": results,
-                                    "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
-                                   indent=2), encoding="utf-8")
-    print(f"\n{'ALL PASS' if all_pass else 'SOME CHECKS FAILED'} — details in {out_path.relative_to(ROOT)}")
-    return 0 if all_pass else 1
+    docs = documents()
+    if args.dry_run:
+        print(json.dumps({"documents": list(docs), "count": len(docs), "answer_key_uploaded": False}))
+        return 0
+    load_dotenv(ROOT / ".env")
+    key = os.getenv("SENSO_API_KEY", "").strip()
+    if not key:
+        raise ValueError("SENSO_API_KEY is required in the environment or ignored root .env")
+    with exclusive_run(args.ledger):
+        ledger = load_ledger(args.ledger)
+        publisher = SensoPublisher(key, NAMESPACE)
+        try:
+            ready = prepare(publisher, ledger, args.ledger, allow_upload=args.upload or args.upload_only,
+                            max_wait_seconds=args.max_wait_seconds)
+        finally:
+            publisher.close()
+        if not ready:
+            return 2
+        return 0 if args.upload_only or check(key, args.ledger, args.runs, args.output) else 1
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except httpx.HTTPStatusError as exc:
-        # Never print the key; body is safe to show for debugging the contract.
-        print(f"Senso returned HTTP {exc.response.status_code} for {exc.request.method} {exc.request.url.path}:"
-              f" {exc.response.text[:300]}")
+    except Exception as exc:
+        print(json.dumps({"error_class": type(exc).__name__, "message": "Corpus check stopped. Inspect the local ledger; no credentials or remote bodies printed."}))
         raise SystemExit(1)
