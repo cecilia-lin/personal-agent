@@ -35,10 +35,13 @@ class AgentService:
             raise Problem("Live identity, model, and merchant adapters are not configured. Set APP_MODE=demo for the local fixture journey.", 503)
 
     def event(self, unit, task, kind, details, provenance="simulated", latency_ms=None):
+        # Writer transactions serialize this sequence, including fixed-clock demos.
+        # UUID lexical order does not represent execution order.
+        sequence = 1 + max((e.get("sequence", 0) for e in unit.all("audit_events")), default=0)
         event = {"kind": kind, "task_id": task.get("id"), "session_id": task.get("session_id"),
                  "run_id": task.get("run_id"), "timestamp": now(), "details": details,
                  "provenance": provenance, "provider": self.model.provider, "latency_ms": latency_ms,
-                 "tokens": None, "cost_minor": None}
+                 "tokens": None, "cost_minor": None, "sequence": sequence}
         unit.save("audit_events", uid("evt"), event)
         if kind != "budget_calculated":
             metric = unit.save("analytics_events", uid("metric"), {
@@ -179,7 +182,7 @@ class AgentService:
             return {"task": task,
                     "proposals": sorted([p for p in unit.all("proposals") if p["task_id"] == task_id], key=lambda p: p["created_at"], reverse=True),
                     "actions": [a for a in unit.all("actions") if a["task_id"] == task_id],
-                    "audit": sorted([e for e in unit.all("audit_events") if e["task_id"] == task_id], key=lambda e: (e["timestamp"], e["id"]))}
+                    "audit": sorted([e for e in unit.all("audit_events") if e["task_id"] == task_id], key=lambda e: (e.get("sequence", 0), e["timestamp"], e["id"]))}
 
     def prepare(self, user_id, task_id, request):
         self.require_demo()

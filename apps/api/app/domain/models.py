@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
 import os
 from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 Money = Annotated[int, Field(ge=0, le=1_000_000_000, strict=True)]
 Provenance = Literal["fixture", "simulated", "cached", "live"]
+NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 def now() -> str:
     fixed = os.getenv("DEMO_NOW", "")
@@ -63,8 +64,8 @@ class Product(Contract):
 class CreateTask(Contract):
     urgency: Literal["now", "soon", "flexible"] = "soon"
     target_price_minor: Money | None = None
-    goal: str = Field(min_length=3, max_length=500)
-    category: str = Field(default="desk-light", min_length=1, max_length=80)
+    goal: NonBlank = Field(min_length=3, max_length=500)
+    category: NonBlank = Field(default="desk-light", max_length=80)
     max_price_minor: Money | None = None
 
 class PrepareProposal(Contract):
@@ -107,10 +108,18 @@ class SourceImport(Contract):
     subject: str = Field(default="", max_length=300)
     sender: str = Field(default="", max_length=300)
 
+    @field_validator("text")
+    @classmethod
+    def meaningful_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Source text must contain non-whitespace characters.")
+        # Preserve the original evidence, including its whitespace.
+        return value
+
 class BillConfirmation(Contract):
-    provider: str = Field(min_length=1, max_length=150)
-    account_ref: str = Field(min_length=1, max_length=100)
-    invoice_id: str = Field(min_length=1, max_length=100)
+    provider: NonBlank = Field(max_length=150)
+    account_ref: NonBlank = Field(max_length=100)
+    invoice_id: NonBlank = Field(max_length=100)
     period_start: str
     period_end: str
     amount_minor: Money

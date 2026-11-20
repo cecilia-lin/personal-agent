@@ -45,17 +45,22 @@ class Documents:
         unit.save("source_versions", source_id + "_v1", {**record, "source_id": source_id})
         return source
 
-    def email(self, unit, text, subject="", sender=""):
-        if text.lstrip().lower().startswith(("from:", "subject:", "mime-version:")):
+    def email(self, unit, text, subject="", sender="", parse_headers=False):
+        if parse_headers or text.lstrip().lower().startswith(("from:", "subject:", "mime-version:", "content-type:")):
             message = Parser(policy=policy.default).parsestr(text)
             subject, sender = subject or str(message.get("Subject", "")), sender or str(message.get("From", ""))
             if message.is_multipart():
                 part = message.get_body(preferencelist=("plain",))
-                if part is None:
-                    raise Problem("Only plain-text email bodies are supported.", 422)
-                body = part.get_content()
             else:
-                body = message.get_content()
+                part = message
+            if part is None or part.get_content_type() != "text/plain":
+                raise Problem("Only plain-text email bodies are supported.", 422)
+            try:
+                body = part.get_content()
+            except (LookupError, ValueError, TypeError):
+                raise Problem("The plain-text email body could not be decoded.", 422)
+            if not isinstance(body, str):
+                raise Problem("Only plain-text email bodies are supported.", 422)
         else:
             body = text
         source = self.source(unit, "email", text, subject, sender)
@@ -107,7 +112,8 @@ class Documents:
         if not request.filename.lower().endswith((".txt", ".eml")):
             raise Problem("Use pasted text, .txt, or plain-text .eml. HTML and binary attachments are unsupported.", 422)
         with self.store.transaction(user_id, write=True) as unit:
-            result = self.email(unit, request.text, request.subject, request.sender)
+            result = self.email(unit, request.text, request.subject, request.sender,
+                                parse_headers=request.filename.lower().endswith(".eml"))
             self.agent.event(unit, {}, "promotion_discovered", {"source_id": result["source"]["id"], "offer_id": result["offer"]["id"], "duplicate": result["duplicate"]})
             return result
 
