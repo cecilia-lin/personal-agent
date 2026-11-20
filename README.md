@@ -7,7 +7,7 @@ A local purchasing agent with explicit Buy/Wait/Skip decisions, urgency, target 
 - Import and confirm a utility bill → update one commitment → recalculate the allowance → save a review card.
 - Import promotional email → compare complete product quotes → review exact terms → approve a merchant-validated demo cart → reserve funds → remove the cart and release its reservation.
 
-React + Vite + TypeScript, FastAPI + Pydantic, and durable SQLite. A SingleStore repository/DDL path and sponsor adapters are included; see [SETUP.md](SETUP.md) for the exact verified scope. No live checkout, payment, bank connection, or production authentication.
+React + Vite + TypeScript, FastAPI + Pydantic, and durable SQLite by default. The optional SingleStore backend passed live SQL and transaction checks; sponsor adapters and setup diagnostics are included. See [SETUP.md](SETUP.md) for the exact verified scope. No live checkout, payment, bank connection, or production authentication.
 
 ## Start on this Windows machine
 

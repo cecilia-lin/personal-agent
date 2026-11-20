@@ -4,9 +4,9 @@ The React client reads persisted backend data over /api through Vite's local pro
 
 ## State and invariants
 
-Each SQL table has (user_id, id) as its primary key, a monotonically increasing version, and a JSON payload. Tables are whitelisted in the repository. Values use parameterized queries and every read/write includes the owner. SQLite uses BEGIN IMMEDIATE for mutations. SingleStore uses a rowstore schema with SHARD KEY(user_id), an owned account-row lock, and conditional version updates. The SingleStore dialect is prepared but requires a live database check.
+Each SQL table has (user_id, id) as its primary key, a monotonically increasing version, and a JSON payload. Tables are whitelisted in the repository. Values use parameterized queries and every read/write includes the owner. SQLite uses BEGIN IMMEDIATE for mutations. SingleStore uses a rowstore schema with SHARD KEY(user_id), an owned account-row lock, and conditional version updates. Its payloads use LONGTEXT, with a widening migration for the initial TEXT schema. TLS SQL access and bounded live ownership, rollback, concurrency, deduplication and persistence checks passed; the existing local app records still use SQLite.
 
-Current tables: accounts, bills, preferences, sessions, tasks, products, proposals, actions, audit_events, analytics_events, holdings (legacy read-only fixture), sources, source_versions, offers, merchant_offers, bill_imports, bill_history, reservations, next_actions, runs, adjustments.
+Current tables: accounts, bills, preferences, sessions, tasks, products, proposals, actions, audit_events, analytics_events, holdings (legacy read-only fixture), sources, source_versions, offers, merchant_offers, bill_imports, bill_history, reservations, next_actions, runs, adjustments, watch_items, price_history.
 
 Money is integer USD cents. Cash snapshot, subsequent adjustments, unpaid commitments, safety buffer, active reservations, and the shopping cap remain distinct. The allowance is max(0, min(uncommitted cash, remaining cap)). Reservations reduce each limiting constraint once; those constraints are compared with min rather than subtracted from each other. No payment or settlement endpoint exists. Cap usage is an explicit stored input; this demo period has no automatic calendar rollover.
 
@@ -48,4 +48,12 @@ The Guild endpoint requires a backend bearer token and a stable platform run ID.
 
 Statsig's gate decision is stored at task creation. SIE only ranks already eligible candidates when that stored gate is true. Current imports use deterministic labeled-text parsing, not SIE extraction.
 
-Audit events and safe analytics metadata commit together. Best-effort SDK enqueue hooks run after commit. Amplitude AI records actual measured domain-tool durations without raw input/output. Product insert IDs are stable; this is not a guaranteed-delivery telemetry queue. External API calls currently occur inside some SQLite transactions; move slow retrieval outside those locks before multi-user deployment.
+Audit events and safe analytics metadata commit together. Best-effort SDK enqueue hooks run after commit. Amplitude AI records actual measured domain-tool durations without raw input/output. Product insert IDs are stable; this is not a guaranteed-delivery telemetry queue. Product retrieval, claim checks, relevance scoring, and watch evidence retrieval run outside write transactions. Product and preference snapshots are checked again before committing their results.
+
+## Required product claims
+
+Candidate responses separate retrieved information from a required-claim verification record and proposal_allowed. The record binds the concrete feature/claim, product fingerprint/version, retrieved evidence fingerprint, supporting evidence fingerprint, provider verdict, check ID, and source/version identifiers. checked_at is preserved from the provider; evaluated_at records the app's evaluation time. No check timestamp or ID is fabricated when the provider has not checked a claim.
+
+Preparation, approval and execution perform fresh checks outside their write transactions, then validate the product snapshot under the transaction. Approval/execution require the claim and evidence binding to match the proposal's exact terms; changed evidence requires a new proposal. An already committed action remains idempotently replayable. Unsupported, conflicting, pending, not-verifiable and error results cannot authorize essential live claims, including direct API requests and watch refreshes.
+
+Live fact-check access was not established within the experiment timebox. The current Senso adapter deliberately returns not_verifiable rather than deriving support from search results. Retrieval is still displayed accurately, and the explicit offline fixture mode retains the cart demonstration. See SENSO_LIVE_ACCESS.md and SENSO_VERIFICATION.md for the distinction between live observations and controlled test verdicts.

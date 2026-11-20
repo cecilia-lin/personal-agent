@@ -38,11 +38,13 @@ Target price means the complete total after discount, tax, and shipping. The har
 | Both local flows | Complete | API smoke and browser walkthrough; test suite |
 | Intent decision and watch behavior | Complete locally | Buy/Wait/Skip, target guard, restart, scan, and archive checks |
 | Senso | Verified retrieval | Matching passage with content and version IDs |
+| Senso required claim | Guard/UI tested; live check pending | Retrieval and verification are separate; essential live claims block until a real fact-check adapter is confirmed. See SENSO_LIVE_ACCESS.md and SENSO_VERIFICATION.md. |
 | SIE | Verified catalog + scoring | Extraction, generation, and OCR remain unimplemented |
 | Statsig | Verified initialization + evaluation | Default false; confirm/create enable_reranker gate and configure intended rule |
 | Amplitude | HTTP delivery verified | Agent SDK instrumentation checked locally; dashboard/session visibility still needs review |
 | Guild hosted execution | Pending | Workspace access, narrowly exposed authenticated backend, integration installation, trigger and schedule |
-| SingleStore | Pending | Database connection credentials; run migration and transaction parity checks |
+| SingleStore | Verified bounded live checks | TLS SQL, schema, isolation, rollback, concurrent duplicate execution and persistence passed; SQLite still holds current local app records |
+| Cognee | Connection verified | Key and workspace access succeed; remember/recall adapter remains unimplemented |
 | Public deployment / real purchasing | Out of scope | This build is a fixed-user local demo |
 
 Configuration is not proof of a successful provider call. Runtime status and the verification report distinguish the scope of each check.
@@ -53,7 +55,7 @@ Owners are deliberately unassigned until teammates claim them.
 
 | Track | Files to own | Next concrete deliverable |
 |---|---|---|
-| Models and canonical state | integrations/sie.py, repositories/, extraction adapter work | Confirm hosted extraction/generation capabilities; implement model-assisted extraction with typed validation; validate SingleStore transactions |
+| Models and canonical state | integrations/sie.py, repositories/, extraction adapter work | Confirm hosted extraction/generation capabilities; implement model-assisted extraction with typed validation; plan deployment and migration using the verified SingleStore path |
 | Purchasing experience | apps/web/, services/intent.py, services/merchant.py | Refine explanation of targets and evidence; validate additional sample categories without changing shared money rules |
 | Utilities and background | services/documents.py, scan handler, docs/guild/ | Install the Guild integration and verify one UI-closed watch/reminder run; verify analytics sessions in dashboard |
 
