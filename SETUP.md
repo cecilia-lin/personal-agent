@@ -42,6 +42,8 @@ Set SENSO_API_KEY. The adapter checks GET /org/me and uses POST /org/search/cont
 
 Passages are evidence, not authority for money, stock, or checkout. A configured failed/empty live retrieval leaves the product unsupported; it does not silently switch to fixture passages. Use -DemoOnly to explicitly run the fixture demo.
 
+Required repairability claims now have a separate verification record and server-owned proposal gate. Arc's replaceable bulb, Fold's replaceable module, and Halo's serviceable components are distinct claims. The timeboxed live fact-check experiment did not obtain a check response; this build therefore retains retrieval but marks essential live claims not_verifiable and blocks proposals. It does not invent a verdict or check ID. The offline cart path is explicitly labeled as a fixture. See [live access findings](docs/SENSO_LIVE_ACCESS.md) and [automated acceptance](docs/SENSO_VERIFICATION.md).
+
 Reference: [Senso quickstart](https://docs.senso.ai/docs/quickstart).
 
 ## 4. SIE and Statsig

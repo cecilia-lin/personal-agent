@@ -44,4 +44,18 @@ export interface Candidate { price_history: PriceObservation[] }
 export interface WatchItem { id: string; task_id: string; product_id: string; product_name: string; target_price_minor: number | null; urgency: string; status: string; created_at: string; last_checked_at: string | null; next_check: string; recommendation: Recommendation }
 export interface Dashboard { watchlist: WatchItem[] }
 
-export interface Candidate { evidence?: { provider?: string; excerpt: string; source_id: string; source_version?: string | number; provenance: string }[] }
+export interface EvidencePassage {
+  provider?: string; excerpt?: string; chunk_text?: string; source_id?: string;
+  content_id?: string; kb_node_id?: string; source_version?: string | number | null;
+  version_id?: string | null; provenance?: string;
+}
+export type VerificationState = 'supported' | 'conflict' | 'unsupported' | 'not_verifiable' | 'pending' | 'error' | 'not_required' | 'demo';
+export interface ClaimVerification {
+  requirement: string; feature?: string | null; claim?: string | null;
+  state: VerificationState; reason: string; check_id?: string | null;
+  product_id: string; product_version?: number; evidence_fingerprint?: string;
+  sources?: EvidencePassage[]; checked_at?: string; provider?: string; provenance?: string;
+}
+export interface Candidate { evidence?: EvidencePassage[]; verification?: ClaimVerification; proposal_allowed?: boolean }
+export interface Terms { verification?: ClaimVerification }
+export interface Action { proposal_id?: string }

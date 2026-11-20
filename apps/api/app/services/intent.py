@@ -10,7 +10,10 @@ class Intent:
     def decide(self, task, candidates):
         eligible = [c for c in candidates if c["eligible"]]
         if not eligible:
-            return {"decision": "Skip", "reason": "No complete quote meets the current budget, stock, and preference checks.",
+            unresolved = next((c for c in candidates if c.get("verification", {}).get("state") in
+                               {"conflict", "unsupported", "not_verifiable", "pending", "error"}), None)
+            detail = (" Required claim unresolved for " + unresolved["name"] + ": " + unresolved["verification"].get("reason", "check pending")) if unresolved else ""
+            return {"decision": "Skip", "reason": "No complete quote meets the current constraints." + detail,
                     "prediction": None, "basis": "current verified constraints"}
         best = min(eligible, key=lambda c: c["total_minor"])
         target, urgency = task.get("target_price_minor"), task.get("urgency", "soon")
@@ -69,7 +72,7 @@ class Intent:
             self.agent.event(unit, task, "watch_saved", {"watch_id": record_id, "product_id": chosen, "decision": decision})
             return watch
 
-    def check_watches(self, unit, run_id, limit):
+    def check_watches(self, unit, run_id, limit, prepared_evidence):
         checked, created = 0, []
         for watch in unit.all("watch_items"):
             if checked >= limit:
@@ -77,23 +80,31 @@ class Intent:
             if watch["status"] != "active":
                 continue
             product = unit.get("products", watch["product_id"])
+            evidence = prepared_evidence.get(product["id"])
+            if evidence is None:
+                continue  # A watch added during retrieval is checked on the next bounded scan.
             ctx = self.agent.context(unit)
             quote = self.agent.merchant.quote(unit, product)
             versions = {"product": product["version"], "budget": ctx["context_versions"],
-                        "quote": quote.get("quote_digest")}
+                        "quote": quote.get("quote_digest"),
+                        "evidence": evidence["verification"].get("evidence_fingerprint"),
+                        "support": evidence["verification"].get("support_fingerprint"),
+                        "verification_state": evidence["verification"]["state"]}
             if watch["last_versions"] == versions and watch["next_check"] > now():
                 continue
             task = unit.get("tasks", watch["task_id"])
             checks = ShoppingSkill.evaluate(product, ctx, watch["max_price_minor"], quote=quote)
             candidate = {**product, **checks, "quote": quote, "price_history": self.history(unit, product["id"]),
-                         "evidence": self.agent.evidence.for_product(product)}
-            if getattr(self.agent.evidence, "requires_context", False) and not candidate["evidence"]:
-                candidate["eligible"] = False
-                candidate["reasons"].append("Configured live evidence retrieval has no verified supporting passage.")
-            decision = self.decide(watch, [candidate])
+                         **evidence}
+            self.agent.apply_evidence(candidate, evidence)
+            stale = self.agent.claim_reason(product, evidence["verification"], ctx["preferences"]["repairable"])
+            if stale:
+                candidate["eligible"] = candidate["proposal_allowed"] = False
+                candidate["reasons"].append(stale)
+            decision = self.agent.proposal_flags(watch, [candidate])
             next_payload = {**watch, "last_checked_at": now(), "last_versions": versions,
                 "next_check": (datetime.fromisoformat(now())+timedelta(hours=1)).isoformat(),
-                "recommendation": decision, "run_id": run_id}
+                "recommendation": decision, "verification": candidate["verification"], "run_id": run_id}
             unit.save("watch_items", watch["id"], next_payload, watch["version"])
             if task["status"] not in {"completed", "rejected", "approved", "awaiting_approval"}:
                 unit.save("tasks", task["id"], {**task, "status": "awaiting_selection" if candidate["eligible"] else "failed",
@@ -110,7 +121,7 @@ class Intent:
                     "reason": decision["reason"], "provenance": "simulated"}, old["version"] if old else None)
             self.agent.event(unit, {**task, "run_id": run_id}, "watch_checked", {
                 "watch_id": watch["id"], "recommendation": decision, "quote_digest": quote.get("quote_digest"),
-                "evidence": candidate["evidence"], "sample_price_history": True,
+                "evidence": candidate["evidence"], "verification": candidate["verification"], "sample_price_history": True,
             })
             checked += 1
         return checked, created

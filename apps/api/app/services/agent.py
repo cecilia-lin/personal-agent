@@ -7,7 +7,8 @@ from app.config import DEMO_USER, ROOT
 from app.domain.models import Account, Bill, Product, Preferences, Problem, now, total
 from app.integrations.contracts import DemoModelClient, LocalRouting
 from app.integrations import amplitude_client, statsig_client
-from app.integrations.senso import evidence_provider
+from app.integrations.claim_verification import allowed, evidence_fingerprint, product_fingerprint
+from app.integrations.senso import evidence_provider, repairability_claim
 from app.integrations.sie import SIERanker
 from app.services.skills import FinanceSkill, ShoppingSkill, UtilitiesSkill, PortfolioSkill
 
@@ -33,6 +34,91 @@ class AgentService:
     def require_demo(self):
         if self.settings.mode != "demo":
             raise Problem("Live identity, model, and merchant adapters are not configured. Set APP_MODE=demo for the local fixture journey.", 503)
+
+    def product_evidence(self, product, required):
+        """Network boundary: callers must finish their read transaction first."""
+        live = bool(getattr(self.evidence, "requires_context", False))
+        passages = []
+        try:
+            passages = self.evidence.for_product(product)
+            if not required:
+                result = {"state": "not_required", "reason": "Repairability is not required by the current preference."}
+            elif not live:
+                result = {"state": "demo", **repairability_claim(product),
+                          "reason": "Fixture catalog only; no Senso claim verification.", "sources": passages}
+            elif hasattr(self.evidence, "verify_product"):
+                result = self.evidence.verify_product(product, passages)
+            else:
+                result = {"state": "not_verifiable", "reason": "Product information retrieved; Senso fact-check access is unavailable."}
+        except Exception as exc:
+            result = {"state": "error", "reason": f"Required claim unresolved: evidence service error ({type(exc).__name__})."}
+        result = {"feature": None, "claim": None, "check_id": None, "checked_at": None, "sources": [],
+                  "provider": "senso" if live else "fixture", "provenance": "live" if live else "fixture",
+                  **result, "requirement": "repairability", "required": required,
+                  "product_id": product["id"], "product_version": product["version"],
+                  "product_fingerprint": product_fingerprint(product),
+                  "evidence_fingerprint": evidence_fingerprint(passages), "evaluated_at": now()}
+        # A provider cannot waive an essential shopper requirement.
+        if required and result["state"] == "not_required":
+            result.update(state="not_verifiable", reason="Required repairability claim was not checked.")
+        if live and required and result["state"] == "supported" and not allowed(result, True):
+            result.update(state="not_verifiable", reason="Fact-check response lacks a check ID or versioned supporting passage.")
+        result["support_fingerprint"] = evidence_fingerprint(result["sources"])
+        return {"evidence": passages, "verification": result}
+
+    def apply_evidence(self, candidate, evidence):
+        candidate.update(evidence)
+        verification = evidence["verification"]
+        verified = allowed(verification, bool(getattr(self.evidence, "requires_context", False)))
+        if not verified:
+            candidate["eligible"] = False
+            candidate["reasons"].append(f"Required claim {verification['state']}: {verification.get('reason', 'unresolved')}")
+        candidate["proposal_allowed"] = candidate["eligible"] and verified
+        return candidate
+
+    def proposal_flags(self, task, candidates):
+        recommendation = self.intent.decide(task, candidates)
+        for candidate in candidates:
+            candidate["proposal_allowed"] = bool(candidate["eligible"] and recommendation["decision"] == "Buy"
+                and allowed(candidate.get("verification", {}), bool(getattr(self.evidence, "requires_context", False)))
+                and (task.get("target_price_minor") is None or candidate["total_minor"] <= task["target_price_minor"]))
+        return recommendation
+
+    def refresh_claim(self, user_id, task_id, product_id):
+        with self.store.transaction(user_id) as unit:
+            task = unit.get("tasks", task_id)
+            product = unit.get("products", product_id)
+            preferences = unit.get("preferences", "shopping")
+            if product["category"] != task["category"]:
+                raise Problem("This product is outside the task's selected category.")
+        evidence = self.product_evidence(product, preferences["repairable"])
+        with self.store.transaction(user_id, write=True) as unit:
+            current = unit.get("products", product_id)
+            ctx = self.context(unit)
+            if product_fingerprint(current) != product_fingerprint(product) or ctx["preferences"]["version"] != preferences["version"]:
+                raise Problem("Product or preference changed during verification. Check again.")
+            task = unit.get("tasks", task_id)
+            quote = self.merchant.quote(unit, current)
+            checks = ShoppingSkill.evaluate(current, ctx, task["max_price_minor"], quote=quote)
+            candidate = self.apply_evidence({**current, **checks, "quote": quote,
+                                            "price_history": self.intent.history(unit, product_id)}, evidence)
+            candidates = [candidate if c["id"] == product_id else c for c in task["checkpoint"].get("candidates", [])]
+            checkpoint = {**task["checkpoint"], "candidates": candidates}
+            if candidates:
+                checkpoint["recommendation"] = self.proposal_flags(task, candidates)
+            unit.save("tasks", task_id, {**task, "checkpoint": checkpoint}, task["version"])
+            self.event(unit, task, "required_claim_checked", {"product_id": product_id, **evidence})
+        return evidence["verification"]
+
+    def claim_reason(self, product, verification, required, original=None):
+        if not verification or verification.get("required") != required or verification.get("product_fingerprint") != product_fingerprint(product):
+            return "Required claim is stale or missing for this product version. Run verification again."
+        if not allowed(verification, bool(getattr(self.evidence, "requires_context", False))):
+            return f"Required claim {verification.get('state', 'pending')}: {verification.get('reason', 'unresolved')}"
+        if original is not None and any(original.get(k) != verification.get(k) for k in (
+                "product_fingerprint", "evidence_fingerprint", "support_fingerprint", "claim", "feature", "required", "provider")):
+            return "Required claim or evidence version changed since this proposal. Review a new proposal."
+        return None
 
     def event(self, unit, task, kind, details, provenance="simulated", latency_ms=None):
         event = {"kind": kind, "task_id": task.get("id"), "session_id": task.get("session_id"),
@@ -121,12 +207,33 @@ class AgentService:
     def run_task(self, user_id, task_id):
         self.require_demo()
         started = perf_counter()
+        with self.store.transaction(user_id) as unit:
+            snapshot = unit.get("tasks", task_id)
+            if snapshot["status"] not in {"queued", "failed", "awaiting_selection"}:
+                return snapshot
+            snapshot_context = self.context(unit)
+            products = self.model.retrieve_candidates(unit.all("products"), snapshot["category"]) if snapshot["skill"] == "shopping" else []
+            candidates = []
+            for product in products:
+                quote = self.merchant.quote(unit, product)
+                checks = ShoppingSkill.evaluate(product, snapshot_context, snapshot["max_price_minor"], quote=quote)
+                candidates.append({**product, **checks, "quote": quote, "price_history": self.intent.history(unit, product["id"])})
+        for candidate in candidates:
+            self.apply_evidence(candidate, self.product_evidence(candidate, snapshot_context["preferences"]["repairable"]))
+        ranking = (self.ranker.score(candidates, snapshot["category"], snapshot_context["preferences"]["repairable"])
+                   if snapshot["routing"].get("enabled") and candidates else
+                   {"provider": "deterministic-demo", "provenance": "simulated", "reason": "enable_reranker is false"})
+        first_run = snapshot["status"] == "queued"
         with self.store.transaction(user_id, write=True) as unit:
             task = unit.get("tasks", task_id)
-            if task["status"] != "queued":
+            if task["version"] != snapshot["version"]:
                 return task
             ctx = self.context(unit)
-            self.event(unit, task, "task_started", {"skill": task["skill"], "routing": task["routing"]})
+            if ctx["context_versions"] != snapshot_context["context_versions"] or any(
+                    product_fingerprint(unit.get("products", p["id"])) != product_fingerprint(p) for p in products):
+                raise Problem("Product or spending context changed while checking evidence. Run the task again.")
+            if first_run:
+                self.event(unit, task, "task_started", {"skill": task["skill"], "routing": task["routing"]})
             self.event(unit, task, "budget_calculated", {
                 "calculation": ctx["budget"], "source_versions": ctx["context_versions"],
                 "source_ids": [ctx["account"]["source_id"]] + [b["source_id"] for b in ctx["bills"]],
@@ -139,29 +246,15 @@ class AgentService:
                 self.event(unit, task, "task_completed", {"checks": checks, "execution": "local_scan"},
                            latency_ms=round((perf_counter() - started) * 1000, 3))
             else:
-                products = self.model.retrieve_candidates(unit.all("products"), task["category"])
-                ranked = products
-                candidates = []
-                for product in ranked:
-                    quote = self.merchant.quote(unit, product)
-                    checks = ShoppingSkill.evaluate(product, ctx, task["max_price_minor"], quote=quote)
-                    passages = self.evidence.for_product(product)
-                    if getattr(self.evidence, "requires_context", False) and not passages:
-                        checks["eligible"] = False
-                        checks["reasons"].append("No supporting Senso product context is available; verify the knowledge base before acting.")
-                    candidates.append({**product, **checks, "quote": quote, "evidence": passages, "price_history": self.intent.history(unit, product["id"])})
-                ranking = (self.ranker.score(candidates, task["category"], ctx["preferences"]["repairable"])
-                           if task["routing"].get("enabled") else
-                           {"provider": "deterministic-demo", "provenance": "simulated", "reason": "enable_reranker is false"})
                 candidates.sort(key=lambda c: (not c["eligible"], -c.get("relevance_score", 0),
                     c["total_minor"] if c["total_minor"] is not None else 10**12, c["id"]))
                 task["checkpoint"] = {"candidates": candidates, "budget": ctx["budget"],
                                       "plan": self.model.plan_task(task["goal"]), "ranking": ranking,
-                                      "recommendation": self.intent.decide(task, candidates)}
+                                      "recommendation": self.proposal_flags(task, candidates)}
                 task["status"] = "awaiting_selection" if any(c["eligible"] for c in candidates) else "failed"
                 task["next_check"] = None
                 self.event(unit, task, "candidates_checked", {"candidates": [
-                    {"product_id": c["id"], "eligible": c["eligible"], "reasons": c["reasons"], "evidence": c["evidence"]}
+                    {"product_id": c["id"], "eligible": c["eligible"], "reasons": c["reasons"], "evidence": c["evidence"], "verification": c["verification"]}
                     for c in candidates], "ranking": ranking}, "fixture", round((perf_counter() - started) * 1000, 3))
                 if task["status"] == "failed":
                     task["error"] = "No candidate meets the current budget, stock, category, preference, and required evidence constraints."
@@ -170,7 +263,8 @@ class AgentService:
             result = unit.save("tasks", task_id, task, task["version"])
         # Send only after the task transaction commits. Re-running an existing task
         # returns above, so it does not emit another first-run event.
-        statsig_client.track_task_started(user_id)
+        if first_run:
+            statsig_client.track_task_started(user_id)
         return result
 
     def detail(self, user_id, task_id):
@@ -183,8 +277,14 @@ class AgentService:
 
     def prepare(self, user_id, task_id, request):
         self.require_demo()
+        verification = self.refresh_claim(user_id, task_id, request.product_id)
         with self.store.transaction(user_id, write=True) as unit:
             task = unit.get("tasks", task_id)
+            product = unit.get("products", request.product_id)
+            ctx = self.context(unit)
+            claim_error = self.claim_reason(product, verification, ctx["preferences"]["repairable"])
+            if claim_error:
+                raise Problem(claim_error)
             if task["status"] not in {"awaiting_selection", "awaiting_approval", "approved"}:
                 raise Problem("Run a shopping task before preparing a proposal.")
             if task["checkpoint"].get("recommendation", {"decision": "Buy"})["decision"] != "Buy":
@@ -218,6 +318,7 @@ class AgentService:
                 "source_version": product["source_version"], "context_versions": ctx["context_versions"],
                 "task_limit_minor": task["max_price_minor"], "target_price_minor": task.get("target_price_minor"),
                 "urgency": task.get("urgency", "soon"), "expires_at": (datetime.fromisoformat(now()) + timedelta(minutes=15)).isoformat(),
+                "verification": verification,
             }
             proposal = unit.save("proposals", uid("proposal"), {
                 "task_id": task_id, "session_id": task["session_id"], "run_id": task["run_id"],
@@ -228,12 +329,15 @@ class AgentService:
             self.event(unit, task, "proposal_prepared", {"proposal_id": proposal["id"], "terms": terms, "terms_digest": proposal["terms_digest"]})
             return proposal
 
-    def stale_reason(self, unit, proposal):
+    def stale_reason(self, unit, proposal, verification=None):
         terms = proposal["terms"]
         if datetime.fromisoformat(terms["expires_at"]) <= datetime.fromisoformat(now()):
             return "Proposal expired. Prepare a new proposal."
         product = unit.get("products", terms["product_id"])
         ctx = self.context(unit)
+        claim_error = self.claim_reason(product, verification, ctx["preferences"]["repairable"], terms.get("verification") or {})
+        if claim_error:
+            return claim_error
         if product["version"] != terms["quote_version"] or product["source_version"] != terms["source_version"]:
             return "Quote or stock changed. Review a new proposal."
         if ctx["context_versions"] != terms["context_versions"]:
@@ -256,26 +360,32 @@ class AgentService:
     def decide(self, user_id, proposal_id, request):
         self.require_demo()
         error = None
+        with self.store.transaction(user_id) as unit:
+            snapshot = unit.get("proposals", proposal_id)
+        verification = (self.refresh_claim(user_id, snapshot["task_id"], snapshot["terms"]["product_id"])
+                        if request.decision == "approve" and snapshot["status"] != "executed" else None)
         with self.store.transaction(user_id, write=True) as unit:
             proposal = unit.get("proposals", proposal_id)
             task = unit.get("tasks", proposal["task_id"])
             if request.terms_digest != proposal["terms_digest"]:
                 raise Problem("Approval does not match the exact proposal terms.")
-            if proposal["status"] in {"executed", "approved"} and request.decision == "approve":
+            if proposal["status"] == "executed" and request.decision == "approve":
                 return proposal
             if proposal["status"] == "rejected" and request.decision == "reject":
                 return proposal
-            if proposal["status"] != "pending":
+            if proposal["status"] not in ({"pending", "approved"} if request.decision == "approve" else {"pending"}):
                 raise Problem("This proposal is no longer pending review.")
             if request.decision == "reject":
                 proposal = unit.save("proposals", proposal_id, {**proposal, "status": "rejected", "decided_at": now()}, proposal["version"])
                 unit.save("tasks", task["id"], {**task, "status": "rejected", "updated_at": now()}, task["version"])
                 self.event(unit, task, "proposal_rejected", {"proposal_id": proposal_id})
             else:
-                error = self.stale_reason(unit, proposal)
+                error = self.stale_reason(unit, proposal, verification)
                 if error:
                     self.invalidate(unit, proposal, task, error)
                 else:
+                    if proposal["status"] == "approved":
+                        return proposal  # Fresh check succeeded; preserve the original approval identity.
                     proposal = unit.save("proposals", proposal_id, {**proposal, "status": "approved", "approved_by": user_id, "approval_id": uid("approval"), "approved_at": now()}, proposal["version"])
                     unit.save("tasks", task["id"], {**task, "status": "approved", "updated_at": now()}, task["version"])
                     self.event(unit, task, "recommendation_accepted", {"proposal_id": proposal_id, "terms_digest": proposal["terms_digest"]})
@@ -286,6 +396,20 @@ class AgentService:
     def execute(self, user_id, proposal_id):
         self.require_demo()
         started, error, action = perf_counter(), None, None
+        with self.store.transaction(user_id) as unit:
+            snapshot = unit.get("proposals", proposal_id)
+            existing = unit.get("actions", "action_" + proposal_id.removeprefix("proposal_"), False)
+            if existing:
+                return existing
+        try:
+            verification = self.refresh_claim(user_id, snapshot["task_id"], snapshot["terms"]["product_id"])
+        except Problem:
+            # A concurrent execution may have committed while this request checked evidence.
+            with self.store.transaction(user_id) as unit:
+                existing = unit.get("actions", "action_" + proposal_id.removeprefix("proposal_"), False)
+                if existing:
+                    return existing
+            raise
         with self.store.transaction(user_id, write=True) as unit:
             proposal = unit.get("proposals", proposal_id)
             task = unit.get("tasks", proposal["task_id"])
@@ -296,7 +420,7 @@ class AgentService:
                 return existing
             if proposal["status"] != "approved" or proposal.get("approved_by") != user_id:
                 raise Problem("An exact, owned, approved proposal is required before execution.")
-            error = self.stale_reason(unit, proposal)
+            error = self.stale_reason(unit, proposal, verification)
             if error:
                 self.invalidate(unit, proposal, task, error)
             else:
@@ -362,6 +486,14 @@ class AgentService:
     def scan(self, user_id, limit=5, guild_run_id=None):
         self.require_demo()
         run_id = "run_guild_" + digest(guild_run_id)[:32] if guild_run_id else uid("run")
+        with self.store.transaction(user_id) as unit:
+            existing = unit.get("runs", run_id, False)
+            if existing:
+                return {**existing.get("result", {}), "run_id": run_id, "duplicate": True, "status": existing["status"]}
+            watched = [w for w in unit.all("watch_items") if w["status"] == "active"][:limit]
+            products = {w["product_id"]: unit.get("products", w["product_id"]) for w in watched}
+            required = unit.get("preferences", "shopping")["repairable"]
+        watch_evidence = {key: self.product_evidence(product, required) for key, product in products.items()}
         with self.store.transaction(user_id, write=True) as unit:
             existing = unit.get("runs", run_id, False)
             if existing:
@@ -374,7 +506,7 @@ class AgentService:
             if not queued_watch and (not watch or watch.get("next_check", now()) <= now() or
                     watch["checkpoint"].get("bill_versions") != ctx["context_versions"]["bills"]):
                 self._new_task(unit, "Check upcoming bills and increases", "utilities", skill="utilities")
-            watches_checked, watch_cards = self.intent.check_watches(unit, run_id, limit)
+            watches_checked, watch_cards = self.intent.check_watches(unit, run_id, limit, watch_evidence)
             created.extend(watch_cards)
             due = [t["id"] for t in unit.all("tasks") if t["status"] == "queued" and (t.get("next_check") or now()) <= now()][:limit]
             for bill in ctx["bills"]:

@@ -38,6 +38,7 @@ Target price means the complete total after discount, tax, and shipping. The har
 | Both local flows | Complete | API smoke and browser walkthrough; test suite |
 | Intent decision and watch behavior | Complete locally | Buy/Wait/Skip, target guard, restart, scan, and archive checks |
 | Senso | Verified retrieval | Matching passage with content and version IDs |
+| Senso required claim | Guard/UI tested; live check pending | Retrieval and verification are separate; essential live claims block until a real fact-check adapter is confirmed. See SENSO_LIVE_ACCESS.md and SENSO_VERIFICATION.md. |
 | SIE | Verified catalog + scoring | Extraction, generation, and OCR remain unimplemented |
 | Statsig | Verified initialization + evaluation | Default false; confirm/create enable_reranker gate and configure intended rule |
 | Amplitude | HTTP delivery verified | Agent SDK instrumentation checked locally; dashboard/session visibility still needs review |

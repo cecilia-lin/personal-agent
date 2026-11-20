@@ -48,4 +48,12 @@ The Guild endpoint requires a backend bearer token and a stable platform run ID.
 
 Statsig's gate decision is stored at task creation. SIE only ranks already eligible candidates when that stored gate is true. Current imports use deterministic labeled-text parsing, not SIE extraction.
 
-Audit events and safe analytics metadata commit together. Best-effort SDK enqueue hooks run after commit. Amplitude AI records actual measured domain-tool durations without raw input/output. Product insert IDs are stable; this is not a guaranteed-delivery telemetry queue. External API calls currently occur inside some SQLite transactions; move slow retrieval outside those locks before multi-user deployment.
+Audit events and safe analytics metadata commit together. Best-effort SDK enqueue hooks run after commit. Amplitude AI records actual measured domain-tool durations without raw input/output. Product insert IDs are stable; this is not a guaranteed-delivery telemetry queue. Product retrieval, claim checks, relevance scoring, and watch evidence retrieval run outside write transactions. Product and preference snapshots are checked again before committing their results.
+
+## Required product claims
+
+Candidate responses separate retrieved information from a required-claim verification record and proposal_allowed. The record binds the concrete feature/claim, product fingerprint/version, retrieved evidence fingerprint, supporting evidence fingerprint, provider verdict, check ID, and source/version identifiers. checked_at is preserved from the provider; evaluated_at records the app's evaluation time. No check timestamp or ID is fabricated when the provider has not checked a claim.
+
+Preparation, approval and execution perform fresh checks outside their write transactions, then validate the product snapshot under the transaction. Approval/execution require the claim and evidence binding to match the proposal's exact terms; changed evidence requires a new proposal. An already committed action remains idempotently replayable. Unsupported, conflicting, pending, not-verifiable and error results cannot authorize essential live claims, including direct API requests and watch refreshes.
+
+Live fact-check access was not established within the experiment timebox. The current Senso adapter deliberately returns not_verifiable rather than deriving support from search results. Retrieval is still displayed accurately, and the explicit offline fixture mode retains the cart demonstration. See SENSO_LIVE_ACCESS.md and SENSO_VERIFICATION.md for the distinction between live observations and controlled test verdicts.
