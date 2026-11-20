@@ -95,9 +95,11 @@ class Store:
     def schema_sql(self):
         prefix = "CREATE ROWSTORE TABLE" if self.settings.db_backend == "singlestore" else "CREATE TABLE"
         shard = ", SHARD KEY (user_id)" if self.settings.db_backend == "singlestore" else ""
+        # Task checkpoints and escaped document text can exceed MySQL TEXT's 64 KiB limit.
+        payload_type = "LONGTEXT" if self.settings.db_backend == "singlestore" else "TEXT"
         return [
             f"{prefix} IF NOT EXISTS {table} (user_id VARCHAR(128) NOT NULL, id VARCHAR(128) NOT NULL, "
-            f"version BIGINT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (user_id,id){shard})"
+            f"version BIGINT NOT NULL, payload {payload_type} NOT NULL, PRIMARY KEY (user_id,id){shard})"
             for table in TABLES
         ]
 
@@ -106,6 +108,14 @@ class Store:
         try:
             for statement in self.schema_sql():
                 connection.cursor().execute(statement)
+            if self.settings.db_backend == "singlestore":
+                cursor = connection.cursor()
+                cursor.execute("SELECT TABLE_NAME, DATA_TYPE FROM information_schema.COLUMNS "
+                               "WHERE TABLE_SCHEMA=DATABASE() AND COLUMN_NAME='payload'")
+                for table, data_type in cursor.fetchall():
+                    if table in TABLES and data_type.lower() in {"tinytext", "text", "mediumtext"}:
+                        # A widening migration preserves records from the initial schema.
+                        connection.cursor().execute(f"ALTER TABLE {table} MODIFY COLUMN payload LONGTEXT NOT NULL")
             connection.commit()
         finally:
             connection.close()

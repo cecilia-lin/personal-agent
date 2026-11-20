@@ -66,15 +66,28 @@ Reference: [Amplitude AI instrumentation](https://amplitude.com/docs/amplitude-a
 
 ## 6. SingleStore
 
+`SINGLESTORE_API_KEY` provides management access. Inspect existing clusters without changing them:
+
+```powershell
+.\scripts\Check-SingleStore.ps1 -Management
+```
+
 Configure SINGLESTORE_HOST, PORT, USER, PASSWORD, and DATABASE with a database connection, not a management API token. TLS certificate/hostname checks remain enabled.
 
 ```powershell
+# Read-only SQL connectivity check, without changing DB_BACKEND:
+.\scripts\Check-SingleStore.ps1
+# Once SQL access works, explicitly initialize the app tables:
 $env:DB_BACKEND='singlestore'
 .\scripts\Migrate.ps1 -PrintSchema
 .\scripts\Migrate.ps1
 ```
 
-The generated DDL is in migrations/001_singlestore.sql. Rowstore primary keys include user_id and the shard key is user_id. Owner-scoped parameterized operations and optimistic versions are shared with SQLite; account-row locking serializes financial writes. No live SingleStore credentials are configured here, so migration and transaction parity on the provider are pending.
+The generated DDL is in migrations/001_singlestore.sql. Rowstore primary keys include user_id and the shard key is user_id. Owner-scoped parameterized operations and optimistic versions are shared with SQLite; account-row locking serializes financial writes. Payloads use LONGTEXT because real task checkpoints exceed TEXT's 64 KiB limit. Initialization also widens existing TEXT payload columns without deleting records.
+
+Management access, TLS SQL login, schema initialization, and bounded live transaction checks passed against the dedicated personal_agent database. Reproduce the checks with `.\.venv\Scripts\python.exe scripts/verify_singlestore.py`: it uses a unique synthetic owner and removes only its own records. It tests ownership, large Unicode documents, rollback, stale versions, concurrent duplicate cart execution, competing proposals, reservation release, bill deduplication, scan redelivery, and persistence.
+
+The existing local app data remains in SQLite, and DB_BACKEND remains sqlite until explicitly changed. No household records were copied into SingleStore by these checks.
 
 Return to SQLite by setting DB_BACKEND=sqlite. A failed selected SingleStore connection is an error, never a silent SQLite fallback.
 
@@ -84,7 +97,15 @@ See [Guild setup](docs/guild/README.md). The bearer-protected review_due_tasks o
 
 No Guild workspace, hosted agent, schedule, or reachable authenticated backend was configured in this environment. These are explicit remaining setup steps, not a working background deployment.
 
-## 8. Re-run verification
+The official CLI launcher is ready: `.\scripts\Guild.ps1 auth login`. Browser sign-in was deferred at the user's request. A backend bearer token was generated in the ignored local `.env`; install it as the integration credential when a narrow authenticated HTTPS endpoint is ready.
+
+## 8. Cognee connection check
+
+Set COGNEE_API_KEY, then run `.\.venv\Scripts\python.exe scripts/check_cognee.py`. The read-only check verifies the key at Cognee's platform API, discovers the current workspace URL when COGNEE_BASE_URL is blank, and checks its authenticated datasets endpoint. A successful URL is saved in the ignored .env. The configured key and workspace returned HTTP 200.
+
+This does not ingest documents, create memories, or test recall. The app still has only a PreferenceMemory interface; no Cognee memory adapter is connected to task decisions. Reference: [Cognee API keys and connection details](https://docs.cognee.ai/cognee-cloud/ui/api-keys).
+
+## 9. Re-run verification
 
 ```powershell
 .\scripts\Verify.ps1

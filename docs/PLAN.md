@@ -42,7 +42,8 @@ Target price means the complete total after discount, tax, and shipping. The har
 | Statsig | Verified initialization + evaluation | Default false; confirm/create enable_reranker gate and configure intended rule |
 | Amplitude | HTTP delivery verified | Agent SDK instrumentation checked locally; dashboard/session visibility still needs review |
 | Guild hosted execution | Pending | Workspace access, narrowly exposed authenticated backend, integration installation, trigger and schedule |
-| SingleStore | Pending | Database connection credentials; run migration and transaction parity checks |
+| SingleStore | Verified bounded live checks | TLS SQL, schema, isolation, rollback, concurrent duplicate execution and persistence passed; SQLite still holds current local app records |
+| Cognee | Connection verified | Key and workspace access succeed; remember/recall adapter remains unimplemented |
 | Public deployment / real purchasing | Out of scope | This build is a fixed-user local demo |
 
 Configuration is not proof of a successful provider call. Runtime status and the verification report distinguish the scope of each check.
