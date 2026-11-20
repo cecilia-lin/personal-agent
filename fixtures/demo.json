@@ -1,0 +1,18 @@
+{
+  "description": "Synthetic household and replaceable desk-light catalog. All amounts are USD cents.",
+  "account": { "spendable_minor": 128000, "protected_minor": 90000, "source_id": "fixture:household-cash:v1" },
+  "bills": [
+    { "id": "electricity", "name": "Electricity", "amount_minor": 11200, "previous_minor": 9400, "due_in_days": 3, "source_id": "fixture:electricity:v1" },
+    { "id": "internet", "name": "Internet", "amount_minor": 6800, "previous_minor": 6800, "due_in_days": 8, "source_id": "fixture:internet:v1" }
+  ],
+  "products": [
+    { "id": "arc-light", "name": "Arc desk light", "category": "desk-light", "description": "Adjustable arm, replaceable bulb, and a two-year fixture warranty.", "price_minor": 8900, "tax_minor": 801, "shipping_minor": 0, "stock": 8, "repairable": true, "source_id": "fixture:arc-quote:v1" },
+    { "id": "fold-light", "name": "Fold task light", "category": "desk-light", "description": "Compact metal task light with a replaceable light module.", "price_minor": 12900, "tax_minor": 1161, "shipping_minor": 500, "stock": 5, "repairable": true, "source_id": "fixture:fold-quote:v1" },
+    { "id": "halo-light", "name": "Halo studio light", "category": "desk-light", "description": "Wide studio illumination with serviceable components.", "price_minor": 21900, "tax_minor": 1971, "shipping_minor": 0, "stock": 3, "repairable": true, "source_id": "fixture:halo-quote:v1" },
+    { "id": "mini-light", "name": "Mini LED light", "category": "desk-light", "description": "Portable, sealed LED design. Bulb cannot be replaced.", "price_minor": 4900, "tax_minor": 441, "shipping_minor": 0, "stock": 12, "repairable": false, "source_id": "fixture:mini-quote:v1" }
+  ],
+  "holdings": [
+    { "id": "broad-market", "name": "Broad-market fund", "value_minor": 420000, "source_id": "fixture:holding:v1" },
+    { "id": "bond-fund", "name": "Bond fund", "value_minor": 180000, "source_id": "fixture:holding:v1" }
+  ]
+}
